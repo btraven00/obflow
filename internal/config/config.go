@@ -112,4 +112,4 @@ func ResolvePlan(cwd string) (string, error) {
 	return plan, nil
 }
 
-var ErrNoPlan = errors.New("no plan: pass <bench.yaml> or run `obflow use <plan>` first")
+var ErrNoPlan = errors.New("no plan: pass <bench.yaml> or run `obrun use <plan>` / `obflow use <plan>` first")

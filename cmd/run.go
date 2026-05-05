@@ -26,6 +26,9 @@ func NewRunCmdProd() *cobra.Command {
 
 func newRunCmdWithDev(devMode bool) *cobra.Command {
 	var prod bool
+	var dirty bool
+	var unpinned bool
+	var cores string
 	c := &cobra.Command{
 		Use:   "run [-- snakemake-args...]",
 		Short: "Invoke `ob run` (uv by default; pixi when software_backend is conda)",
@@ -60,21 +63,14 @@ Extra arguments after -- are passed through to snakemake (via ob run).`,
 			passIdx := cmd.Flags().ArgsLenAtDash()
 			if passIdx >= 0 {
 				passThrough = args[passIdx:]
-			} else {
-				passThrough = args
 			}
-			// Extract --cores from snakemake passthrough so it reaches ob run
-			// as a first-class flag rather than a duplicate snakemake arg
-			// (ob run already adds --cores 1 by default; two --cores flags error).
-			coresVal, passThrough := extractFlag(passThrough, "--cores")
-			unpinned, passThrough := extractBoolFlag(passThrough, "--unpinned")
 			subArgs := []string{"run"}
-			if !effectiveProd {
+			if !effectiveProd || dirty {
 				subArgs = append(subArgs, "--dirty")
 			}
 			subArgs = append(subArgs, yamlPath)
-			if coresVal != "" {
-				subArgs = append(subArgs, "--cores", coresVal)
+			if cores != "" {
+				subArgs = append(subArgs, "--cores", cores)
 			}
 			if unpinned {
 				subArgs = append(subArgs, "--unpinned")
@@ -89,32 +85,10 @@ Extra arguments after -- are passed through to snakemake (via ob run).`,
 	if devMode {
 		c.Flags().BoolVar(&prod, "prod", false, "run without --dirty (upstream-pinned mode)")
 	}
+	c.Flags().BoolVar(&dirty, "dirty", false, "allow local path references (uncommitted changes)")
+	c.Flags().BoolVar(&unpinned, "unpinned", false, "allow branch refs (results may not be reproducible)")
+	c.Flags().StringVar(&cores, "cores", "", "number of cores to pass to snakemake")
 	return c
-}
-
-// extractFlag removes --flag <value> or --flag=value from args and returns the
-// value and the remaining slice. Returns ("", args) if the flag is not present.
-func extractFlag(args []string, flag string) (string, []string) {
-	prefix := flag + "="
-	for i, a := range args {
-		if strings.HasPrefix(a, prefix) {
-			return a[len(prefix):], append(args[:i:i], args[i+1:]...)
-		}
-		if a == flag && i+1 < len(args) {
-			return args[i+1], append(args[:i:i], args[i+2:]...)
-		}
-	}
-	return "", args
-}
-
-// extractBoolFlag removes --flag from args and reports whether it was present.
-func extractBoolFlag(args []string, flag string) (bool, []string) {
-	for i, a := range args {
-		if a == flag {
-			return true, append(args[:i:i], args[i+1:]...)
-		}
-	}
-	return false, args
 }
 
 // dispatchOb runs `ob <subArgs...>` via uv (default) or pixi (when the

@@ -10,6 +10,7 @@ import (
 func main() {
 	c := cmd.NewRunCmdProd()
 	c.Use = "obrun"
+	c.SilenceUsage = true
 	c.Short = "a no-frills ob runner"
 	c.Long = `Runs the configured omnibenchmark against its canonical plan.
 

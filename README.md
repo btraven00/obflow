@@ -4,7 +4,7 @@ An opinionated [omnibenchmark](https://docs.omnibenchmark.org) set of tools.
 
 A no-frills `ob` runner.
 
-Grab the prebuilt binary from [releases](TBD) and drop it on your `PATH`.
+Grab the prebuilt binary from [releases](https://github.com/btraven00/obflow/releases/tag/nightly) and drop it on your `PATH`.
 
 ```sh
 obrun use ~/lab/some-bench/bench.yaml   # remember the active plan
