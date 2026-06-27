@@ -26,6 +26,7 @@ const (
 // TrackBranch. OldSHA/NewSHA hold whatever the commit field was/became — a SHA
 // or a branch name depending on the operation.
 type PinResult struct {
+	Stage    string
 	ModuleID string
 	URL      string
 	OldSHA   string
@@ -62,6 +63,7 @@ func looksLikeSHA(s string) bool {
 // CI bot): {"modules":[{module,url,old,new,status,detail}]}.
 func ResultsJSON(rs []PinResult) ([]byte, error) {
 	type row struct {
+		Stage  string `json:"stage,omitempty"`
 		Module string `json:"module"`
 		URL    string `json:"url"`
 		Old    string `json:"old"`
@@ -72,6 +74,7 @@ func ResultsJSON(rs []PinResult) ([]byte, error) {
 	rows := make([]row, 0, len(rs))
 	for _, r := range rs {
 		rows = append(rows, row{
+			Stage:  r.Stage,
 			Module: r.ModuleID,
 			URL:    r.URL,
 			Old:    r.OldSHA,
@@ -116,7 +119,7 @@ func Pin(benchYAML string, lock *Lock, ref string, abbrev int) ([]PinResult, err
 	urlToNew := map[string]string{}
 	results := make([]PinResult, 0, len(lock.Modules))
 	for _, fr := range fetchResults {
-		pr := PinResult{ModuleID: fr.Module.ID, URL: fr.Module.Remote}
+		pr := PinResult{Stage: fr.Module.Stage, ModuleID: fr.Module.ID, URL: fr.Module.Remote}
 		if fr.Err != nil {
 			pr.Err = fr.Err
 			results = append(results, pr)
@@ -224,44 +227,45 @@ func PinRemote(benchYAML, ref string, abbrev int) ([]PinResult, error) {
 	}
 	cache := map[string]resolved{}
 
-	mods := bench.Modules()
-	results := make([]PinResult, 0, len(mods))
-	for _, mod := range mods {
-		url := mod.Repository.URL
-		cur := mod.Repository.Commit
-		pr := PinResult{ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
+	var results []PinResult
+	for _, st := range bench.Stages {
+		for _, mod := range st.Modules {
+			url := mod.Repository.URL
+			cur := mod.Repository.Commit
+			pr := PinResult{Stage: st.ID, ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
 
-		// Never re-pin an existing pin.
-		if looksLikeSHA(cur) {
-			pr.Status = StatusAlreadyPinned
+			// Never re-pin an existing pin.
+			if looksLikeSHA(cur) {
+				pr.Status = StatusAlreadyPinned
+				results = append(results, pr)
+				continue
+			}
+
+			useRef := ref
+			if useRef == "" {
+				useRef = cur
+			}
+			key := normRemote(url) + "\x00" + useRef
+			r, ok := cache[key]
+			if !ok {
+				sha, e := resolveRemoteRef(url, useRef)
+				r = resolved{sha: sha, err: e}
+				cache[key] = r
+			}
+			switch {
+			case r.err != nil:
+				pr.Status = StatusError
+				pr.Warning = r.err.Error()
+				pr.Err = r.err
+			case r.sha == "":
+				pr.Status = StatusNotFound
+				pr.Warning = fmt.Sprintf("ref %q not found in remote", useRef)
+			default:
+				pr.Status = StatusPinned
+				pr.NewSHA = abbreviate(r.sha, abbrev)
+			}
 			results = append(results, pr)
-			continue
 		}
-
-		useRef := ref
-		if useRef == "" {
-			useRef = cur
-		}
-		key := normRemote(url) + "\x00" + useRef
-		r, ok := cache[key]
-		if !ok {
-			sha, e := resolveRemoteRef(url, useRef)
-			r = resolved{sha: sha, err: e}
-			cache[key] = r
-		}
-		switch {
-		case r.err != nil:
-			pr.Status = StatusError
-			pr.Warning = r.err.Error()
-			pr.Err = r.err
-		case r.sha == "":
-			pr.Status = StatusNotFound
-			pr.Warning = fmt.Sprintf("ref %q not found in remote", useRef)
-		default:
-			pr.Status = StatusPinned
-			pr.NewSHA = abbreviate(r.sha, abbrev)
-		}
-		results = append(results, pr)
 	}
 
 	if err := applyResults(benchYAML, results); err != nil {
@@ -293,35 +297,36 @@ func TrackBranch(benchYAML, branch string) ([]PinResult, error) {
 	}
 	cache := map[string]probe{}
 
-	mods := bench.Modules()
-	results := make([]PinResult, 0, len(mods))
-	for _, mod := range mods {
-		url := mod.Repository.URL
-		cur := mod.Repository.Commit
-		pr := PinResult{ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
+	var results []PinResult
+	for _, st := range bench.Stages {
+		for _, mod := range st.Modules {
+			url := mod.Repository.URL
+			cur := mod.Repository.Commit
+			pr := PinResult{Stage: st.ID, ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
 
-		key := normRemote(url)
-		p, ok := cache[key]
-		if !ok {
-			sha, e := remoteBranchSHA(url, branch)
-			p = probe{exists: sha != "", err: e}
-			cache[key] = p
+			key := normRemote(url)
+			p, ok := cache[key]
+			if !ok {
+				sha, e := remoteBranchSHA(url, branch)
+				p = probe{exists: sha != "", err: e}
+				cache[key] = p
+			}
+			switch {
+			case p.err != nil:
+				pr.Status = StatusError
+				pr.Warning = p.err.Error()
+				pr.Err = p.err
+			case !p.exists:
+				pr.Status = StatusNotFound
+				pr.Warning = fmt.Sprintf("branch %q not found in remote", branch)
+			case cur == branch:
+				pr.Status = StatusUnchanged
+			default:
+				pr.Status = StatusTracking
+				pr.NewSHA = branch
+			}
+			results = append(results, pr)
 		}
-		switch {
-		case p.err != nil:
-			pr.Status = StatusError
-			pr.Warning = p.err.Error()
-			pr.Err = p.err
-		case !p.exists:
-			pr.Status = StatusNotFound
-			pr.Warning = fmt.Sprintf("branch %q not found in remote", branch)
-		case cur == branch:
-			pr.Status = StatusUnchanged
-		default:
-			pr.Status = StatusTracking
-			pr.NewSHA = branch
-		}
-		results = append(results, pr)
 	}
 
 	if err := applyResults(benchYAML, results); err != nil {

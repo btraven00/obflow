@@ -63,7 +63,7 @@ func printResults(results []workspace.PinResult, asJSON bool) error {
 		return nil
 	}
 	for _, r := range results {
-		line := fmt.Sprintf("%-20s %-15s", r.ModuleID, r.Status)
+		line := fmt.Sprintf("%-10s %-20s %-15s", r.Stage, r.ModuleID, r.Status)
 		switch r.Status {
 		case workspace.StatusPinned, workspace.StatusTracking:
 			line += fmt.Sprintf("%s -> %s", disp(r.OldSHA), disp(r.NewSHA))
