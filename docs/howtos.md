@@ -61,22 +61,33 @@ obflow trim            # clean up merged local branches
 `plan pin` is upstream-only (`git fetch origin && rev-parse origin/<ref>`),
 so the SHAs it writes are always fetchable by anyone.
 
-## Pin a plan without a workspace (CI / no clones)
+## Pin / unpin a plan without a workspace (CI / no clones)
 
 ```sh
-obflow plan pin --remote                     # deref each module's current branch
-obflow plan pin --remote --ref my-branch     # pin every module to my-branch's SHA
+obflow plan pin --remote                  # freeze: deref each module's branch -> SHA
+obflow plan pin --remote --ref my-branch  # freeze every module to my-branch's SHA
+obflow plan track my-branch               # thaw: point modules at my-branch (where it exists)
 ```
 
-`--remote` resolves SHAs with `git ls-remote <url> <ref>`, so it needs neither
-sibling clones nor a lock file. It edits only the `commit:` lines, leaving the
-rest of the YAML byte-for-byte intact — ideal for a minimal-diff PR. Values
-already pinned to a SHA are left unchanged (reported as warnings).
+Both resolve over the network with `git ls-remote`, so they need neither sibling
+clones nor a lock file, and both edit only the `commit:` lines — the rest of the
+YAML stays byte-for-byte intact (minimal-diff PRs).
 
-This is what the **pin-commits bot** runs: comment `/pin-commits` (optionally
-`/pin-commits <ref>`) on a PR/issue and a GitHub Action opens/updates a
-dedicated pin PR with the resolved SHAs. See
-`.github/workflows/pin-commits.yml` in a benchmark repo for the workflow.
+- `pin --remote` **never re-pins a module already at a SHA** — a deliberate
+  freeze is never silently moved (reported `already-pinned`).
+- `track <branch>` only switches modules whose remote actually has that branch;
+  the rest are left alone (reported `not-found`).
+
+Add `--json` to get `{"modules":[{module,url,old,new,status,detail}]}` for
+scripting / bots.
+
+These are what the **obflow bot** runs. In a benchmark repo, comment:
+
+- `/pin-commits [ref]` — freeze module commits.
+- `/track-branch <branch>` — move modules onto a branch.
+
+On a PR the change is committed onto that PR's branch; on an issue it opens a
+dedicated PR. See `.github/workflows/obflow-bot.yml` and its `README.md`.
 
 ## Use your own forks instead of pushing to upstream
 

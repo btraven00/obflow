@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,14 +12,77 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PinResult records what happened for one module during Pin.
+// Per-module outcome statuses, shared by pin and track.
+const (
+	StatusPinned        = "pinned"         // branch/ref resolved to a SHA
+	StatusAlreadyPinned = "already-pinned" // commit was already a SHA; left as-is
+	StatusTracking      = "tracking"       // commit set to a branch name
+	StatusNotFound      = "not-found"      // requested branch/ref absent in remote
+	StatusUnchanged     = "unchanged"      // already at the requested value
+	StatusError         = "error"
+)
+
+// PinResult records what happened for one module during Pin / PinRemote /
+// TrackBranch. OldSHA/NewSHA hold whatever the commit field was/became — a SHA
+// or a branch name depending on the operation.
 type PinResult struct {
 	ModuleID string
 	URL      string
 	OldSHA   string
 	NewSHA   string
-	Warning  string // non-fatal issue (e.g., not an ancestor)
+	Status   string // one of the Status* constants
+	Warning  string // human-readable detail (not-found reason, error text, ...)
 	Err      error
+}
+
+// abbreviate shortens a full hex SHA to n chars, matching the plan convention
+// of short commit ids. A non-SHA value (e.g. a branch name), n <= 0, or a value
+// already shorter than n is returned unchanged.
+func abbreviate(s string, n int) string {
+	if n <= 0 || len(s) <= n || !looksLikeSHA(s) {
+		return s
+	}
+	return s[:n]
+}
+
+// looksLikeSHA reports whether s is a hex git object name of at least 7 chars.
+func looksLikeSHA(s string) bool {
+	if len(s) < 7 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ResultsJSON renders results as a stable document for machine consumers (the
+// CI bot): {"modules":[{module,url,old,new,status,detail}]}.
+func ResultsJSON(rs []PinResult) ([]byte, error) {
+	type row struct {
+		Module string `json:"module"`
+		URL    string `json:"url"`
+		Old    string `json:"old"`
+		New    string `json:"new"`
+		Status string `json:"status"`
+		Detail string `json:"detail,omitempty"`
+	}
+	rows := make([]row, 0, len(rs))
+	for _, r := range rs {
+		rows = append(rows, row{
+			Module: r.ModuleID,
+			URL:    r.URL,
+			Old:    r.OldSHA,
+			New:    r.NewSHA,
+			Status: r.Status,
+			Detail: r.Warning,
+		})
+	}
+	return json.MarshalIndent(struct {
+		Modules []row `json:"modules"`
+	}{rows}, "", "  ")
 }
 
 // Pin updates the canonical YAML's repository.commit for each module by
@@ -28,7 +92,7 @@ type PinResult struct {
 //
 // Mutates benchYAML in place. Returns per-module results so the caller
 // can present diffs/warnings.
-func Pin(benchYAML string, lock *Lock, ref string) ([]PinResult, error) {
+func Pin(benchYAML string, lock *Lock, ref string, abbrev int) ([]PinResult, error) {
 	if ref == "" {
 		ref = "HEAD"
 	}
@@ -58,8 +122,9 @@ func Pin(benchYAML string, lock *Lock, ref string) ([]PinResult, error) {
 			results = append(results, pr)
 			continue
 		}
-		pr.NewSHA = fr.Out
-		urlToNew[normRemote(fr.Module.Remote)] = fr.Out
+		sha := abbreviate(fr.Out, abbrev)
+		pr.NewSHA = sha
+		urlToNew[normRemote(fr.Module.Remote)] = sha
 		results = append(results, pr)
 	}
 
@@ -118,19 +183,35 @@ func Pin(benchYAML string, lock *Lock, ref string) ([]PinResult, error) {
 		}
 	}
 
+	// Classify each result for structured/JSON output.
+	for i := range results {
+		switch {
+		case results[i].Err != nil:
+			results[i].Status = StatusError
+		case results[i].OldSHA == results[i].NewSHA:
+			results[i].Status = StatusUnchanged
+		default:
+			results[i].Status = StatusPinned
+		}
+	}
+
 	return results, nil
 }
 
-// PinRemote updates the canonical YAML's repository.commit for each module by
-// resolving a ref to a SHA over the network with `git ls-remote` — no clones,
-// no lock file (CI-friendly). The ref is `ref` when non-empty (applied to every
-// module, matching `Pin --ref` semantics), else each module's current commit
-// value (dereference-in-place). Refs that don't resolve (e.g. the field is
-// already a SHA, or the branch is gone) are left unchanged with a Warning.
+// PinRemote freezes each module's tracked branch to a concrete SHA over the
+// network with `git ls-remote` — no clones, no lock file (CI-friendly). The ref
+// resolved per module is `ref` when non-empty (applied to every module, like
+// `Pin --ref`), else the module's current commit value (dereference-in-place).
+//
+// A module whose commit is ALREADY a SHA is never re-pinned: it is left exactly
+// as-is and reported StatusAlreadyPinned. This keeps `pin` idempotent and
+// non-destructive — a deliberate freeze is never silently moved.
+//
+// Written SHAs are abbreviated to `abbrev` hex chars (0 = full).
 //
 // Mutates benchYAML in place. Returns per-module results so the caller can
-// present a diff.
-func PinRemote(benchYAML, ref string) ([]PinResult, error) {
+// present a diff / structured feedback.
+func PinRemote(benchYAML, ref string, abbrev int) ([]PinResult, error) {
 	bench, err := benchmark.Load(benchYAML)
 	if err != nil {
 		return nil, err
@@ -142,19 +223,25 @@ func PinRemote(benchYAML, ref string) ([]PinResult, error) {
 		err error
 	}
 	cache := map[string]resolved{}
-	urlToNew := map[string]string{}
 
 	mods := bench.Modules()
 	results := make([]PinResult, 0, len(mods))
 	for _, mod := range mods {
 		url := mod.Repository.URL
 		cur := mod.Repository.Commit
+		pr := PinResult{ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
+
+		// Never re-pin an existing pin.
+		if looksLikeSHA(cur) {
+			pr.Status = StatusAlreadyPinned
+			results = append(results, pr)
+			continue
+		}
+
 		useRef := ref
 		if useRef == "" {
 			useRef = cur
 		}
-		pr := PinResult{ModuleID: mod.ID, URL: url, OldSHA: cur}
-
 		key := normRemote(url) + "\x00" + useRef
 		r, ok := cache[key]
 		if !ok {
@@ -164,31 +251,80 @@ func PinRemote(benchYAML, ref string) ([]PinResult, error) {
 		}
 		switch {
 		case r.err != nil:
+			pr.Status = StatusError
+			pr.Warning = r.err.Error()
 			pr.Err = r.err
 		case r.sha == "":
-			pr.NewSHA = cur
-			pr.Warning = fmt.Sprintf("could not resolve %q (already a SHA or unknown ref); left unchanged", useRef)
+			pr.Status = StatusNotFound
+			pr.Warning = fmt.Sprintf("ref %q not found in remote", useRef)
 		default:
-			pr.NewSHA = r.sha
-			urlToNew[normRemote(url)] = r.sha
+			pr.Status = StatusPinned
+			pr.NewSHA = abbreviate(r.sha, abbrev)
 		}
 		results = append(results, pr)
 	}
 
-	// Surgically rewrite only the commit lines so the rest of the file —
-	// indentation, blank lines, comments — is preserved byte-for-byte. A full
-	// yaml.v3 round-trip (writeYAML) reflows the whole document, which would
-	// bury the SHA changes in a huge diff when this runs as a bot PR.
-	src, err := os.ReadFile(benchYAML)
-	if err != nil {
+	if err := applyResults(benchYAML, results); err != nil {
 		return results, err
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(src, &root); err != nil {
-		return results, fmt.Errorf("parse %s: %w", benchYAML, err)
+	return results, nil
+}
+
+// TrackBranch is the inverse of PinRemote: it points each module's commit at the
+// branch `branch`, but ONLY for modules whose remote actually has that branch.
+// Modules lacking the branch are left untouched (StatusNotFound); modules
+// already on it are StatusUnchanged. Use it to move modules from a frozen SHA
+// (or another branch) back onto a live branch.
+//
+// Mutates benchYAML in place.
+func TrackBranch(benchYAML, branch string) ([]PinResult, error) {
+	if branch == "" {
+		return nil, fmt.Errorf("track: a branch name is required")
 	}
-	out := rewriteCommitLines(src, &root, urlToNew)
-	if err := os.WriteFile(benchYAML, out, 0644); err != nil {
+	bench, err := benchmark.Load(benchYAML)
+	if err != nil {
+		return nil, err
+	}
+
+	// Probe each unique url once.
+	type probe struct {
+		exists bool
+		err    error
+	}
+	cache := map[string]probe{}
+
+	mods := bench.Modules()
+	results := make([]PinResult, 0, len(mods))
+	for _, mod := range mods {
+		url := mod.Repository.URL
+		cur := mod.Repository.Commit
+		pr := PinResult{ModuleID: mod.ID, URL: url, OldSHA: cur, NewSHA: cur}
+
+		key := normRemote(url)
+		p, ok := cache[key]
+		if !ok {
+			sha, e := remoteBranchSHA(url, branch)
+			p = probe{exists: sha != "", err: e}
+			cache[key] = p
+		}
+		switch {
+		case p.err != nil:
+			pr.Status = StatusError
+			pr.Warning = p.err.Error()
+			pr.Err = p.err
+		case !p.exists:
+			pr.Status = StatusNotFound
+			pr.Warning = fmt.Sprintf("branch %q not found in remote", branch)
+		case cur == branch:
+			pr.Status = StatusUnchanged
+		default:
+			pr.Status = StatusTracking
+			pr.NewSHA = branch
+		}
+		results = append(results, pr)
+	}
+
+	if err := applyResults(benchYAML, results); err != nil {
 		return results, err
 	}
 	return results, nil
@@ -196,43 +332,67 @@ func PinRemote(benchYAML, ref string) ([]PinResult, error) {
 
 var commitLineRe = regexp.MustCompile(`^(\s*commit:\s+)(\S+)(.*)$`)
 
-// rewriteCommitLines returns src with each module's repository.commit replaced
-// by urlToNew[url]. It locates the exact source line of every commit scalar via
-// the parsed node tree (node.Line) and edits only that line, leaving leading
-// indentation and any trailing inline comment untouched.
-func rewriteCommitLines(src []byte, root *yaml.Node, urlToNew map[string]string) []byte {
-	lineToNew := map[int]string{}
-	walkRepositories(root, func(repo *yaml.Node) {
-		url := repoURL(repo)
-		if url == "" {
-			return
-		}
-		newSHA, ok := urlToNew[normRemote(url)]
-		if !ok {
-			return
-		}
-		for i := 0; i+1 < len(repo.Content); i += 2 {
-			k := repo.Content[i]
-			v := repo.Content[i+1]
-			if k.Value == "commit" && v.Kind == yaml.ScalarNode {
-				if v.Value != newSHA {
-					lineToNew[v.Line] = quoteIfNumeric(newSHA)
-				}
-				break
-			}
-		}
-	})
-	if len(lineToNew) == 0 {
-		return src
+// applyResults rewrites benchYAML's commit lines from the per-module results.
+// Each result is paired POSITIONALLY with its repository's commit scalar (both
+// are in document order), so modules sharing a repo URL but holding different
+// commits are handled independently — only results whose New differs from Old
+// are written. The edit is surgical (one line each): indentation, blank lines,
+// and comments are preserved byte-for-byte, unlike a yaml.v3 round-trip which
+// reflows the whole document.
+func applyResults(benchYAML string, results []PinResult) error {
+	src, err := os.ReadFile(benchYAML)
+	if err != nil {
+		return err
 	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(src, &root); err != nil {
+		return fmt.Errorf("parse %s: %w", benchYAML, err)
+	}
+
+	var commitNodes []*yaml.Node
+	walkRepositories(&root, func(repo *yaml.Node) {
+		commitNodes = append(commitNodes, repoCommitNode(repo))
+	})
+	if len(commitNodes) != len(results) {
+		return fmt.Errorf("plan structure changed under us: %d repositories vs %d modules",
+			len(commitNodes), len(results))
+	}
+
+	lineToNew := map[int]string{}
+	for i, r := range results {
+		if commitNodes[i] == nil || r.NewSHA == r.OldSHA {
+			continue
+		}
+		lineToNew[commitNodes[i].Line] = quoteIfNumeric(r.NewSHA)
+	}
+	if len(lineToNew) == 0 {
+		return nil
+	}
+	return os.WriteFile(benchYAML, editCommitLines(src, lineToNew), 0644)
+}
+
+// repoCommitNode returns the scalar value node of a repository's `commit` key,
+// or nil if absent.
+func repoCommitNode(repo *yaml.Node) *yaml.Node {
+	for i := 0; i+1 < len(repo.Content); i += 2 {
+		if repo.Content[i].Value == "commit" && repo.Content[i+1].Kind == yaml.ScalarNode {
+			return repo.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// editCommitLines replaces the value token on each 1-based line in lineToNew,
+// keeping that line's indentation, `commit:` key, and trailing inline comment.
+func editCommitLines(src []byte, lineToNew map[int]string) []byte {
 	lines := strings.Split(string(src), "\n")
 	for i := range lines {
-		newSHA, ok := lineToNew[i+1] // yaml node lines are 1-based
+		v, ok := lineToNew[i+1]
 		if !ok {
 			continue
 		}
 		if m := commitLineRe.FindStringSubmatch(lines[i]); m != nil {
-			lines[i] = m[1] + newSHA + m[3]
+			lines[i] = m[1] + v + m[3]
 		}
 	}
 	return []byte(strings.Join(lines, "\n"))
@@ -266,6 +426,25 @@ func resolveRemoteRef(url, ref string) (string, error) {
 		return "", err
 	}
 	return pickRefSHA(out, ref), nil
+}
+
+// remoteBranchSHA returns the SHA of refs/heads/<branch> in the remote at url,
+// or "" if that branch does not exist there.
+func remoteBranchSHA(url, branch string) (string, error) {
+	if url == "" || branch == "" {
+		return "", nil
+	}
+	out, err := Git("", "ls-remote", "--heads", url, branch)
+	if err != nil {
+		return "", err
+	}
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[1] == "refs/heads/"+branch {
+			return f[0], nil
+		}
+	}
+	return "", nil
 }
 
 // pickRefSHA selects a SHA from `git ls-remote` output (lines of "<sha>\t<ref>")

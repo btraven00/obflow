@@ -29,8 +29,13 @@ Pass `--help` to any command for full flag reference.
 |---|---|
 | `obflow plan fmt [path] [--local]` | Reformat a plan YAML in place (preserves comments). |
 | `obflow plan pin [--ref REF]` | Rewrite canonical commit SHAs from `origin/<ref>` using local clones. Default ref: `origin/HEAD`. |
-| `obflow plan pin --remote [--ref REF]` | Same, but resolve SHAs over the network with `git ls-remote` — no clones, no lock. Without `--ref`, dereferences each module's current branch in place. Surgical: edits only the commit lines. CI-friendly (used by the pin-commits bot). |
+| `obflow plan pin --remote [--ref REF] [--json]` | Same, but resolve SHAs over the network with `git ls-remote` — no clones, no lock. Without `--ref`, dereferences each module's current branch in place. **Never re-pins a module already at a SHA** (reported `already-pinned`). Surgical: edits only the commit lines. CI-friendly (used by the bot). |
+| `obflow plan track <branch> [path] [--json]` | Inverse of pin: point each module's commit at `<branch>`, but only where that branch exists in the remote (others reported `not-found`). Network-only, surgical. |
 | `obflow plan promote` | Copy local YAML edits back into canonical (urls/commits restored). |
+
+`pin --remote` and `track` report a per-module **status** — `pinned`, `already-pinned`,
+`tracking`, `unchanged`, `not-found`, or `error` — as a table, or as
+`{"modules":[{module,url,old,new,status,detail}]}` with `--json` (what the bot consumes).
 
 ## Configuration
 

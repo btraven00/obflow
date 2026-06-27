@@ -10,6 +10,7 @@ func newPlanCmd() *cobra.Command {
 	c.AddCommand(
 		newFmtCmd(),
 		newPinCmd(),
+		newTrackCmd(),
 		newPromoteCmd(),
 	)
 	return c
