@@ -28,7 +28,8 @@ Pass `--help` to any command for full flag reference.
 | Command | Purpose |
 |---|---|
 | `obflow plan fmt [path] [--local]` | Reformat a plan YAML in place (preserves comments). |
-| `obflow plan pin [--ref REF]` | Rewrite canonical commit SHAs from `origin/<ref>`. Default ref: `origin/HEAD`. |
+| `obflow plan pin [--ref REF]` | Rewrite canonical commit SHAs from `origin/<ref>` using local clones. Default ref: `origin/HEAD`. |
+| `obflow plan pin --remote [--ref REF]` | Same, but resolve SHAs over the network with `git ls-remote` — no clones, no lock. Without `--ref`, dereferences each module's current branch in place. Surgical: edits only the commit lines. CI-friendly (used by the pin-commits bot). |
 | `obflow plan promote` | Copy local YAML edits back into canonical (urls/commits restored). |
 
 ## Configuration

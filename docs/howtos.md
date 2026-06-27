@@ -61,6 +61,23 @@ obflow trim            # clean up merged local branches
 `plan pin` is upstream-only (`git fetch origin && rev-parse origin/<ref>`),
 so the SHAs it writes are always fetchable by anyone.
 
+## Pin a plan without a workspace (CI / no clones)
+
+```sh
+obflow plan pin --remote                     # deref each module's current branch
+obflow plan pin --remote --ref my-branch     # pin every module to my-branch's SHA
+```
+
+`--remote` resolves SHAs with `git ls-remote <url> <ref>`, so it needs neither
+sibling clones nor a lock file. It edits only the `commit:` lines, leaving the
+rest of the YAML byte-for-byte intact — ideal for a minimal-diff PR. Values
+already pinned to a SHA are left unchanged (reported as warnings).
+
+This is what the **pin-commits bot** runs: comment `/pin-commits` (optionally
+`/pin-commits <ref>`) on a PR/issue and a GitHub Action opens/updates a
+dedicated pin PR with the resolved SHAs. See
+`.github/workflows/pin-commits.yml` in a benchmark repo for the workflow.
+
 ## Use your own forks instead of pushing to upstream
 
 ```sh
